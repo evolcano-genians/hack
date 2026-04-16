@@ -34,21 +34,21 @@
   <div id="results"></div>
 
 <script>
-var results = document.getElementById('results');
-var status = document.getElementById('status');
+var resultsEl = document.getElementById('results');
+var statusEl = document.getElementById('status');
 
 function card(title, cls, content) {
   var div = document.createElement('div');
   div.className = 'card ' + cls;
   div.innerHTML = '<b>' + title + '</b><pre>' + content + '</pre>';
-  results.appendChild(div);
+  resultsEl.appendChild(div);
 }
 
 async function runTest() {
-  results.innerHTML = '';
+  resultsEl.innerHTML = '';
   var target = document.getElementById('target').value.replace(/\/$/, '');
-  status.style.background = '#0f3460';
-  status.textContent = 'Testing CORS on ' + target + '...';
+  statusEl.style.background = '#0f3460';
+  statusEl.textContent = 'Testing CORS on ' + target + '...';
 
   // Test 1: GET /api/tenants (public endpoint)
   try {
@@ -132,14 +132,14 @@ async function runTest() {
   }
 
   // Summary
-  var vulnCards = results.querySelectorAll('.success').length;
+  var vulnCards = resultsEl.querySelectorAll('.success').length;
   if (vulnCards > 0) {
-    status.style.background = '#e94560';
-    status.textContent = 'VULNERABLE — ' + vulnCards + '개 테스트 성공 (외부에서 API 접근 가능)';
+    statusEl.style.background = '#e94560';
+    statusEl.textContent = 'VULNERABLE — ' + vulnCards + '개 테스트 성공 (외부에서 API 접근 가능)';
   } else {
-    status.style.background = '#4ecca3';
-    status.style.color = '#000';
-    status.textContent = 'SAFE — CORS가 올바르게 차단하고 있습니다.';
+    statusEl.style.background = '#4ecca3';
+    statusEl.style.color = '#000';
+    statusEl.textContent = 'SAFE — CORS가 올바르게 차단하고 있습니다.';
   }
 }
 </script>
